@@ -4,9 +4,12 @@
 #include "esp_log.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "ds3231.h"
 
 static const char *TAG = "NVS";
 static nvs_handle_t s_nvs = 0;
+
+#define SAVED_TIME_BLOB_SIZE 8U
 
 static void log_missing(const char *key)
 {
@@ -131,4 +134,114 @@ esp_err_t storage_save_cd_total(uint32_t total_s)
         return err;
     }
     return nvs_commit(s_nvs);
+}
+
+static bool time_is_valid(const rtc_time_t *t)
+{
+    return t != NULL && t->year >= 2000 && t->year <= 2099 &&
+           t->month >= 1 && t->month <= 12 &&
+           t->day >= 1 && t->day <= ds3231_days_in_month(t->year, t->month) &&
+           t->hour < 24 && t->minute < 60 && t->second < 60;
+}
+
+esp_err_t storage_load_time(rtc_time_t *t)
+{
+    if (s_nvs == 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (t == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    rtc_time_t loaded = {
+        0
+    };
+    uint64_t packed = 0;
+    esp_err_t err = nvs_get_u64(s_nvs, "last_time64", &packed);
+    if (err == ESP_OK) {
+        loaded.second = (uint8_t)(packed % 100U);
+        packed /= 100U;
+        loaded.minute = (uint8_t)(packed % 100U);
+        packed /= 100U;
+        loaded.hour = (uint8_t)(packed % 100U);
+        packed /= 100U;
+        loaded.day = (uint8_t)(packed % 100U);
+        packed /= 100U;
+        loaded.month = (uint8_t)(packed % 100U);
+        packed /= 100U;
+        loaded.year = (uint16_t)packed;
+    } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+        /* Đọc blob cũ; giờ mới được lưu riêng dưới key uint64 để không đổi kiểu key NVS. */
+        size_t size = 0;
+        err = nvs_get_blob(s_nvs, "last_time", NULL, &size);
+        if (err != ESP_OK) {
+            if (err == ESP_ERR_NVS_NOT_FOUND) {
+                log_missing("last_time");
+            }
+            return err;
+        }
+        if (size != SAVED_TIME_BLOB_SIZE) {
+            ESP_LOGW(TAG, "saved time has unsupported legacy format");
+            return ESP_ERR_NVS_NOT_FOUND;
+        }
+        uint8_t blob[SAVED_TIME_BLOB_SIZE];
+        err = nvs_get_blob(s_nvs, "last_time", blob, &size);
+        if (err != ESP_OK) {
+            return err;
+        }
+        if (blob[0] != 1U) {
+            ESP_LOGW(TAG, "saved time has unsupported legacy version");
+            return ESP_ERR_NVS_NOT_FOUND;
+        }
+        loaded.year = (uint16_t)(((uint16_t)blob[1] << 8) | blob[2]);
+        loaded.month = blob[3];
+        loaded.day = blob[4];
+        loaded.hour = blob[5];
+        loaded.minute = blob[6];
+        loaded.second = blob[7];
+    } else {
+        if (err == ESP_ERR_NVS_NOT_FOUND) {
+            log_missing("last_time");
+        }
+        return err;
+    }
+
+    if (!time_is_valid(&loaded)) {
+        ESP_LOGW(TAG, "saved time is invalid");
+        return ESP_ERR_NVS_NOT_FOUND;
+    }
+    loaded.weekday = ds3231_calc_weekday(loaded.year, loaded.month, loaded.day);
+    *t = loaded;
+    ESP_LOGD(TAG, "loaded time %04d-%02d-%02d %02d:%02d:%02d",
+             (int)loaded.year, (int)loaded.month, (int)loaded.day,
+             (int)loaded.hour, (int)loaded.minute, (int)loaded.second);
+    return ESP_OK;
+}
+
+esp_err_t storage_save_time(const rtc_time_t *t)
+{
+    if (s_nvs == 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!time_is_valid(t)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint64_t packed = t->year;
+    packed = packed * 100U + t->month;
+    packed = packed * 100U + t->day;
+    packed = packed * 100U + t->hour;
+    packed = packed * 100U + t->minute;
+    packed = packed * 100U + t->second;
+    esp_err_t err = nvs_set_u64(s_nvs, "last_time64", packed);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_commit(s_nvs);
+    if (err == ESP_OK) {
+        ESP_LOGD(TAG, "saved time %04d-%02d-%02d %02d:%02d:%02d",
+                 (int)t->year, (int)t->month, (int)t->day,
+                 (int)t->hour, (int)t->minute, (int)t->second);
+    }
+    return err;
 }

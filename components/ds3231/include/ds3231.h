@@ -12,7 +12,8 @@
 #include "rtc_time.h"
 
 /* Gắn thiết bị vào bus, kiểm tra cờ OSF (mất nguồn pin) -> nếu có thì đặt giờ = giờ build
- * rồi xóa OSF; ép chế độ 24h. Gọi khi đang giữ i2c_mutex. */
+ * rồi xóa OSF; ép chế độ 24h. Gọi khi đang giữ i2c_mutex. Trạng thái OSF lúc khởi tạo
+ * được giữ lại để truy vấn bằng ds3231_power_lost_at_init(). */
 esp_err_t ds3231_init(void);
 
 /* Đọc ngày giờ (weekday được tự tính từ ngày). */
@@ -26,6 +27,9 @@ esp_err_t ds3231_get_temperature(float *temp_c);
 
 /* true nếu cờ OSF đang bật (dao động từng bị dừng, giờ không đáng tin). */
 bool ds3231_lost_power(void);
+
+/* true nếu lần ds3231_init() gần nhất phát hiện OSF (RTC từng mất nguồn). Không đọc bus. */
+bool ds3231_power_lost_at_init(void);
 
 /* Tính thứ trong tuần (Sakamoto). Trả về 0=Thứ 2 .. 6=Chủ nhật. */
 uint8_t ds3231_calc_weekday(uint16_t year, uint8_t month, uint8_t day);

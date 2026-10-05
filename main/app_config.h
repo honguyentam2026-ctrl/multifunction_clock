@@ -47,6 +47,7 @@
 #define TEMP_WARN_C         35.0f       /* ngưỡng cảnh báo nhiệt độ cao */
 #define TEMP_WARN_HYST_C    2.0f        /* chỉ cảnh báo lại sau khi nhiệt độ < TEMP_WARN_C - giá trị này */
 #define DIAG_PERIOD_MS      30000       /* chu kỳ in chẩn đoán */
+#define TIME_SAVE_PERIOD_SEC 10           /* lưu giờ NVS mỗi N giây, khi giây chia hết cho N */
 
 /* ====================== TASK: ĐỘ ƯU TIÊN / STACK ====================== */
 /* Ưu tiên: nút cao nhất (không mất phím) > clock/mode/alarm (nhạy thời gian)
@@ -60,7 +61,7 @@
 #define PRIO_DIAG           1
 
 #define STACK_BUTTON        3072
-#define STACK_CLOCK         3072
+#define STACK_CLOCK         4096
 #define STACK_MODE_MANAGER  5120
 #define STACK_ALARM         2048
 #define STACK_DISPLAY       4096

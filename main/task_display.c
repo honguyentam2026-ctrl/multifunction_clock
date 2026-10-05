@@ -34,6 +34,10 @@ static const rect_t EDIT_RECT[5] = {
     { 40, 39, 24, 16 },
     { 76, 39, 48, 16 },
 };
+static const rect_t EDIT_RECT_ALARM[2] = {
+    {  6,  8, 48, 32 },
+    { 78,  8, 48, 32 },
+};
 
 static void draw_mode_dots(const display_msg_t *m)
 {
@@ -114,6 +118,49 @@ static void draw_text_centered(int y, const char *s, int scale)
 static void draw_text_right(int y, const char *s)
 {
     ssd1306_draw_text_scaled(SSD1306_WIDTH - ssd1306_text_width(s, 1), y, s, 1);
+}
+
+static void draw_alarm_screen(const display_msg_t *m, bool highlight)
+{
+    char buf[8];
+    ssd1306_clear();
+    ssd1306_draw_text_scaled(0, 0, "ALARM", 1);
+
+    if (!m->editing) {
+        (void)snprintf(buf, sizeof(buf), "%02d:%02d", (int)m->time.hour, (int)m->time.minute);
+        draw_text_right(0, buf);
+    }
+    if (!m->rtc_ok) {
+        ssd1306_draw_text_scaled(42, 0, "RTC ERR", 1);
+    }
+
+    uint8_t alarm_hour = m->editing ? m->time.hour : m->alarm_hour;
+    uint8_t alarm_minute = m->editing ? m->time.minute : m->alarm_minute;
+    (void)snprintf(buf, sizeof(buf), "%02d:%02d", (int)alarm_hour, (int)alarm_minute);
+    int scale = (ssd1306_text_width(buf, 4) <= SSD1306_WIDTH) ? 4 : 3;
+    int time_x = (SSD1306_WIDTH - ssd1306_text_width(buf, scale)) / 2;
+    ssd1306_draw_text_scaled(time_x, 8, buf, scale);
+
+    const char *state = m->alarm_enabled ? "ON" : "OFF";
+    int state_width = ssd1306_text_width(state, 2);
+    int group_width = state_width + (m->alarm_enabled ? 12 : 0);
+    int state_x = (SSD1306_WIDTH - group_width) / 2;
+    ssd1306_draw_text_scaled(state_x, 40, state, 2);
+    if (m->alarm_enabled) {
+        ssd1306_draw_bitmap(state_x + state_width + 4, 44, 8, 8, icon_bell);
+    }
+
+    if (m->editing) {
+        ssd1306_draw_text_scaled(0, 56, "OK:save HOLD:cancel", 1);
+        if (highlight && m->edit_field < 2U) {
+            const rect_t *r = &EDIT_RECT_ALARM[m->edit_field];
+            ssd1306_invert_region(r->x, r->y, r->w, r->h);
+        }
+    } else {
+        ssd1306_draw_text_scaled(0, 56, "OK:on/off H:edit", 1);
+    }
+
+    draw_mode_dots(m);
 }
 
 /* MM:SS.d (tối đa 99:59.9). Từ 100 phút trở lên đổi sang HH:MM:SS (quay vòng sau 99 giờ). */
@@ -263,6 +310,8 @@ static void draw_screen(const display_msg_t *m, bool highlight)
         draw_timer_done_screen(highlight);
     } else if (m->alarm_ringing) {
         draw_clock_screen(m, highlight);            /* overlay báo thức, hiện ở mọi chế độ */
+    } else if (m->mode == UI_ALARM) {
+        draw_alarm_screen(m, highlight);
     } else if (m->mode == UI_STOPWATCH) {
         draw_stopwatch_screen(m);
     } else if (m->mode == UI_COUNTDOWN) {

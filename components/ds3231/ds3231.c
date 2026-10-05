@@ -19,6 +19,7 @@
 
 static const char *TAG = "RTC";
 static i2c_master_dev_handle_t s_dev = NULL;
+static bool s_power_lost_at_init = false;
 
 static uint8_t bcd2bin(uint8_t v) { return (uint8_t)((v >> 4) * 10 + (v & 0x0F)); }
 static uint8_t bin2bcd(uint8_t v) { return (uint8_t)(((v / 10) << 4) | (v % 10)); }
@@ -87,6 +88,7 @@ static void build_time(rtc_time_t *t)
 
 esp_err_t ds3231_init(void)
 {
+    s_power_lost_at_init = false;
     if (s_dev == NULL) {
         i2c_device_config_t cfg = {
             .dev_addr_length = I2C_ADDR_BIT_LEN_7,
@@ -106,6 +108,7 @@ esp_err_t ds3231_init(void)
         ESP_LOGE(TAG, "DS3231 not responding: %s", esp_err_to_name(err));
         return err;
     }
+    s_power_lost_at_init = (status & STATUS_OSF) != 0;
 
     /* Chẩn đoán trạng thái RTC trước khi quá trình khởi tạo có thể ghi thay đổi. */
     uint8_t ctrl = 0;
@@ -237,4 +240,9 @@ bool ds3231_lost_power(void)
         return false;
     }
     return (status & STATUS_OSF) != 0;
+}
+
+bool ds3231_power_lost_at_init(void)
+{
+    return s_power_lost_at_init;
 }
