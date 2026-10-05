@@ -5,6 +5,7 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "ds3231.h"
+#include "app_config.h"
 
 static const char *TAG = "NVS";
 static nvs_handle_t s_nvs = 0;
@@ -242,6 +243,106 @@ esp_err_t storage_save_time(const rtc_time_t *t)
         ESP_LOGD(TAG, "saved time %04d-%02d-%02d %02d:%02d:%02d",
                  (int)t->year, (int)t->month, (int)t->day,
                  (int)t->hour, (int)t->minute, (int)t->second);
+    }
+    return err;
+}
+
+esp_err_t storage_load_settings(uint8_t *brightness, uint8_t *dim_preset,
+                                bool *unit_f, bool *beep_on)
+{
+    if (s_nvs == 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (brightness == NULL || dim_preset == NULL || unit_f == NULL || beep_on == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint8_t bright = OLED_BRIGHTNESS_LEVEL_COUNT - 1U;
+    uint8_t dim = 0;
+    uint8_t fahrenheit = 0;
+    uint8_t beep = ENABLE_BUTTON_BEEP ? 1U : 0U;
+    esp_err_t err = nvs_get_u8(s_nvs, "bright", &bright);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        log_missing("bright");
+        bright = OLED_BRIGHTNESS_LEVEL_COUNT - 1U;
+    } else if (err != ESP_OK) {
+        return err;
+    } else if (bright >= OLED_BRIGHTNESS_LEVEL_COUNT) {
+        ESP_LOGW(TAG, "invalid brightness setting %u, using default", (unsigned)bright);
+        bright = OLED_BRIGHTNESS_LEVEL_COUNT - 1U;
+    }
+
+    err = nvs_get_u8(s_nvs, "dim_preset", &dim);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        log_missing("dim_preset");
+        dim = 0;
+    } else if (err != ESP_OK) {
+        return err;
+    } else if (dim >= AUTO_DIM_PRESET_COUNT) {
+        ESP_LOGW(TAG, "invalid auto-dim preset %u, using OFF", (unsigned)dim);
+        dim = 0;
+    }
+
+    err = nvs_get_u8(s_nvs, "unit_f", &fahrenheit);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        log_missing("unit_f");
+        fahrenheit = 0;
+    } else if (err != ESP_OK) {
+        return err;
+    } else if (fahrenheit > 1U) {
+        ESP_LOGW(TAG, "invalid temperature unit setting, using Celsius");
+        fahrenheit = 0;
+    }
+
+    err = nvs_get_u8(s_nvs, "beep_on", &beep);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        log_missing("beep_on");
+        beep = ENABLE_BUTTON_BEEP ? 1U : 0U;
+    } else if (err != ESP_OK) {
+        return err;
+    } else if (beep > 1U) {
+        ESP_LOGW(TAG, "invalid button beep setting, using default");
+        beep = ENABLE_BUTTON_BEEP ? 1U : 0U;
+    }
+
+    *brightness = bright;
+    *dim_preset = dim;
+    *unit_f = fahrenheit != 0U;
+    *beep_on = beep != 0U;
+    return ESP_OK;
+}
+
+esp_err_t storage_save_settings(uint8_t brightness, uint8_t dim_preset,
+                                bool unit_f, bool beep_on)
+{
+    if (s_nvs == 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (brightness >= OLED_BRIGHTNESS_LEVEL_COUNT || dim_preset >= AUTO_DIM_PRESET_COUNT) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t err = nvs_set_u8(s_nvs, "bright", brightness);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_u8(s_nvs, "dim_preset", dim_preset);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_u8(s_nvs, "unit_f", unit_f ? 1U : 0U);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_u8(s_nvs, "beep_on", beep_on ? 1U : 0U);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_commit(s_nvs);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "saved settings: brightness %u, dim %u, unit %s, beep %s",
+                 (unsigned)brightness, (unsigned)dim_preset,
+                 unit_f ? "F" : "C", beep_on ? "ON" : "OFF");
     }
     return err;
 }

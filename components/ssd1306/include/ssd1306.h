@@ -1,8 +1,8 @@
 /*
  * ssd1306 - Driver OLED 128x64 (SSD1306 hoac SH1106) tren driver I2C master moi.
  *
- * Moi ham ve chi ghi vao framebuffer (RAM). Chi ssd1306_init() va ssd1306_flush() moi
- * cham bus I2C -> NGUOI GOI phai giu i2c_mutex quanh hai ham nay.
+ * Moi ham ve chi ghi vao framebuffer (RAM). ssd1306_init(), ssd1306_set_contrast() va
+ * ssd1306_flush() cham bus I2C -> NGUOI GOI phai giu i2c_mutex quanh cac ham nay.
  */
 #pragma once
 

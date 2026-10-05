@@ -4,7 +4,7 @@
  *   Ưu tiên  : PRIO_DISPLAY (2)
  *   Chu kỳ   : chặn trên displayQueue, timeout DISPLAY_TIMEOUT_MS (dùng cho nhấp nháy)
  *   Queue    : NHẬN displayQueue (ModeManagerTask gửi bằng xQueueOverwrite)
- *   I2C      : giữ i2c_mutex chỉ quanh ssd1306_flush()
+ *   I2C      : giữ i2c_mutex quanh ssd1306_set_contrast() và ssd1306_flush()
  */
 #include "task_display.h"
 
@@ -23,6 +23,8 @@
 
 static const char *TAG = "DISP";
 #define BLINK_PERIOD_MS 500
+#define MODE_DOT_START_X (SSD1306_WIDTH - UI_MODE_COUNT * 4)
+#define MODE_FOOTER_WIDTH (MODE_DOT_START_X - 2)
 
 static const char *const WEEKDAY_NAME[7] = { "T2", "T3", "T4", "T5", "T6", "T7", "CN" };
 
@@ -41,13 +43,39 @@ static const rect_t EDIT_RECT_ALARM[2] = {
 
 static void draw_mode_dots(const display_msg_t *m)
 {
-    int start_x = 110;
+    int start_x = MODE_DOT_START_X;
     int y = 58;
     for (int i = 0; i < UI_MODE_COUNT; i++) {
         bool filled = (i == (int)m->mode);
         int x = start_x + i * 4;
         ssd1306_draw_rect(x, y, 2, 2, filled);
     }
+}
+
+static void draw_text_clipped(int x, int y, const char *text, int scale, int max_width)
+{
+    char clipped[48];
+    size_t len = strlen(text);
+    size_t max_chars = (size_t)((max_width + scale) / (6 * scale));
+    if (len > max_chars) {
+        len = max_chars;
+    }
+    if (len >= sizeof(clipped)) {
+        len = sizeof(clipped) - 1U;
+    }
+    memcpy(clipped, text, len);
+    clipped[len] = '\0';
+    ssd1306_draw_text_scaled(x, y, clipped, scale);
+}
+
+static float display_temperature(float celsius, bool unit_f)
+{
+    return unit_f ? (celsius * 9.0f / 5.0f) + 32.0f : celsius;
+}
+
+static char temperature_unit(const display_msg_t *m)
+{
+    return m->settings.unit_f ? 'F' : 'C';
 }
 
 static void draw_clock_screen(const display_msg_t *m, bool highlight)
@@ -83,7 +111,7 @@ static void draw_clock_screen(const display_msg_t *m, bool highlight)
             ssd1306_invert_region(0, 56, 40, 8);
         }
     } else if (m->editing) {
-        ssd1306_draw_text_scaled(0, 56, "OK:save HOLD:cancel", 1);
+        draw_text_clipped(0, 56, "OK:save HOLD:cncl", 1, MODE_FOOTER_WIDTH);
         if (highlight && m->edit_field < 5) {
             const rect_t *r = &EDIT_RECT[m->edit_field];
             ssd1306_invert_region(r->x, r->y, r->w, r->h);
@@ -92,15 +120,20 @@ static void draw_clock_screen(const display_msg_t *m, bool highlight)
         snprintf(buf, sizeof(buf), "STATE: %s", m->alarm_enabled ? "ON" : "OFF");
         ssd1306_draw_text_scaled(0, 56, buf, 1);
     } else if (!m->rtc_ok) {
-        ssd1306_draw_text_scaled(0, 56, "RTC ERROR-SW CLOCK", 1);
+        draw_text_clipped(0, 56, "RTC ERROR-SW", 1, MODE_FOOTER_WIDTH);
     } else if (!m->env_valid) {
-        ssd1306_draw_text_scaled(0, 56, "--.-C", 1);
+        (void)snprintf(buf, sizeof(buf), "--.-%c", temperature_unit(m));
+        draw_text_clipped(0, 56, buf, 1, MODE_FOOTER_WIDTH);
     } else if (m->hum_valid) {
-        snprintf(buf, sizeof(buf), "%.1fC  H:%d%%", (double)m->temp_c, (int)(m->hum_pct + 0.5f));
-        ssd1306_draw_text_scaled(0, 56, buf, 1);
+        (void)snprintf(buf, sizeof(buf), "%.1f%c H:%d%%",
+                       (double)display_temperature(m->temp_c, m->settings.unit_f),
+                       temperature_unit(m), (int)(m->hum_pct + 0.5f));
+        draw_text_clipped(0, 56, buf, 1, MODE_FOOTER_WIDTH);
     } else {
-        snprintf(buf, sizeof(buf), "%.1fC %s", (double)m->temp_c, m->temp_from_rtc ? "(RTC)" : "");
-        ssd1306_draw_text_scaled(0, 56, buf, 1);
+        (void)snprintf(buf, sizeof(buf), "%.1f%c %s",
+                       (double)display_temperature(m->temp_c, m->settings.unit_f),
+                       temperature_unit(m), m->temp_from_rtc ? "(RTC)" : "");
+        draw_text_clipped(0, 56, buf, 1, MODE_FOOTER_WIDTH);
     }
 
     draw_mode_dots(m);
@@ -118,6 +151,48 @@ static void draw_text_centered(int y, const char *s, int scale)
 static void draw_text_right(int y, const char *s)
 {
     ssd1306_draw_text_scaled(SSD1306_WIDTH - ssd1306_text_width(s, 1), y, s, 1);
+}
+
+static void draw_settings_screen(const display_msg_t *m)
+{
+    char value[16];
+    static const char *const labels[4] = { "BRIGHT", "AUTO-DIM", "UNIT", "BEEP" };
+    ssd1306_clear();
+    ssd1306_draw_text_scaled(0, 0, "SETTINGS", 1);
+
+    for (uint8_t row = 0; row < 4U; row++) {
+        int y = 14 + row * 10;
+        switch (row) {
+        case 0:
+            (void)snprintf(value, sizeof(value), "%u/5", (unsigned)m->settings.brightness + 1U);
+            break;
+        case 1:
+            if (m->settings.dim_preset == 0U) {
+                (void)snprintf(value, sizeof(value), "OFF");
+            } else {
+                static const char *const dim_labels[AUTO_DIM_PRESET_COUNT] = {
+                    "OFF", "22-06", "23-07", "21-06"
+                };
+                (void)snprintf(value, sizeof(value), "%s", dim_labels[m->settings.dim_preset]);
+            }
+            break;
+        case 2:
+            (void)snprintf(value, sizeof(value), "%s", m->settings.unit_f ? "F" : "C");
+            break;
+        default:
+            (void)snprintf(value, sizeof(value), "%s", m->settings.beep_on ? "ON" : "OFF");
+            break;
+        }
+        ssd1306_draw_text_scaled(0, y, row == m->settings.cursor ? ">" : " ", 1);
+        ssd1306_draw_text_scaled(10, y, labels[row], 1);
+        draw_text_right(y, value);
+        if (row == m->settings.cursor) {
+            ssd1306_invert_region(0, y, SSD1306_WIDTH, 8);
+        }
+    }
+
+    draw_text_clipped(0, 56, "UP/DN:sel OK:set", 1, MODE_FOOTER_WIDTH);
+    draw_mode_dots(m);
 }
 
 static void draw_alarm_screen(const display_msg_t *m, bool highlight)
@@ -151,13 +226,13 @@ static void draw_alarm_screen(const display_msg_t *m, bool highlight)
     }
 
     if (m->editing) {
-        ssd1306_draw_text_scaled(0, 56, "OK:save HOLD:cancel", 1);
+        draw_text_clipped(0, 56, "OK:save HOLD:cncl", 1, MODE_FOOTER_WIDTH);
         if (highlight && m->edit_field < 2U) {
             const rect_t *r = &EDIT_RECT_ALARM[m->edit_field];
             ssd1306_invert_region(r->x, r->y, r->w, r->h);
         }
     } else {
-        ssd1306_draw_text_scaled(0, 56, "OK:on/off H:edit", 1);
+        draw_text_clipped(0, 56, "OK:on/off H:edit", 1, MODE_FOOTER_WIDTH);
     }
 
     draw_mode_dots(m);
@@ -186,17 +261,38 @@ static void draw_stopwatch_screen(const display_msg_t *m)
     int scale = format_stopwatch(m->sw.elapsed_ms, buf, sizeof(buf));
     draw_text_centered(scale == 3 ? 12 : 16, buf, scale);
 
-    /* 3 vòng gần nhất (đã lưu tối đa 5) */
-    if (m->sw.lap_count == 0U) {
-        ssd1306_draw_text_scaled(0, 56, "OK:go/stop DN:lap", 1);
+    if (m->sw.lap_total == 0U) {
+        draw_text_clipped(0, 56, "OK:go/stop DN:lap", 1, MODE_FOOTER_WIDTH);
     } else {
-        int first = (m->sw.lap_count > 3U) ? (int)m->sw.lap_count - 3 : 0;
-        int row = 0;
-        for (int i = first; i < (int)m->sw.lap_count; i++, row++) {
-            char lap[16];
-            (void)format_stopwatch(m->sw.laps_ms[i], lap, sizeof(lap));
-            (void)snprintf(buf, sizeof(buf), "L%d %s", i + 1, lap);
-            ssd1306_draw_text_scaled(0, 38 + row * 8, buf, 1);
+        int first_lap_width = 0;
+        for (uint8_t row = 0; row < m->sw.row_count; row++) {
+            char elapsed[16];
+            (void)format_stopwatch(m->sw.row_ms[row], elapsed, sizeof(elapsed));
+            (void)snprintf(buf, sizeof(buf), "L%u %s", (unsigned)m->sw.row_no[row], elapsed);
+            if (ssd1306_text_width(buf, 1) <= MODE_FOOTER_WIDTH) {
+                if (row == 0U) {
+                    first_lap_width = ssd1306_text_width(buf, 1);
+                }
+                ssd1306_draw_text_scaled(0, 38 + row * 8, buf, 1);
+            } else {
+                (void)snprintf(buf, sizeof(buf), "L%u", (unsigned)m->sw.row_no[row]);
+                if (row == 0U) {
+                    first_lap_width = ssd1306_text_width(buf, 1);
+                }
+                ssd1306_draw_text_scaled(0, 38 + row * 8, buf, 1);
+            }
+        }
+        if (m->sw.lap_total > 3U && !m->sw.running) {
+            const char *hint = "UP:more";
+            if (first_lap_width + 4 + ssd1306_text_width(hint, 1) > SSD1306_WIDTH) {
+                hint = "UP";
+            }
+            if (first_lap_width + 4 + ssd1306_text_width(hint, 1) > SSD1306_WIDTH) {
+                hint = "^";
+            }
+            if (first_lap_width + 4 + ssd1306_text_width(hint, 1) <= SSD1306_WIDTH) {
+                draw_text_right(38, hint);
+            }
         }
     }
     draw_mode_dots(m);
@@ -226,7 +322,7 @@ static void draw_countdown_screen(const display_msg_t *m, bool highlight)
     draw_text_centered(14, buf, 4);
 
     if (m->editing) {
-        ssd1306_draw_text_scaled(0, 56, "OK:save HOLD:quit", 1);
+        draw_text_clipped(0, 56, "OK:save HOLD:quit", 1, MODE_FOOTER_WIDTH);
         if (highlight && m->edit_field < 2U) {
             const rect_t *r = &CD_EDIT_RECT[m->edit_field];
             ssd1306_invert_region(r->x, r->y, r->w, r->h);
@@ -240,56 +336,10 @@ static void draw_countdown_screen(const display_msg_t *m, bool highlight)
             int fill = (int)(((uint64_t)rem * (uint64_t)(bar_w - 4)) / m->cd.total_ms);
             ssd1306_fill_rect(bar_x + 2, bar_y + 2, fill, bar_h - 4, true);
         }
-        const char *hint = (m->cd.state == CD_IDLE) ? "UP/DN:min OK:start"
+        const char *hint = (m->cd.state == CD_IDLE) ? "UP/DN:min OK:go"
                          : (m->cd.state == CD_RUNNING) ? "OK:pause" : "OK:go DN:reset";
-        ssd1306_draw_text_scaled(0, 56, hint, 1);
+        draw_text_clipped(0, 56, hint, 1, MODE_FOOTER_WIDTH);
     }
-    draw_mode_dots(m);
-}
-
-/* ===================== PHASE 8: TEMP ===================== */
-
-static void draw_temp_screen(const display_msg_t *m, bool highlight)
-{
-    char buf[32];
-    ssd1306_clear();
-    ssd1306_draw_text_scaled(0, 0, "TEMP", 1);
-
-    if (m->temp_warn) {
-        if (highlight) {
-            draw_text_right(0, "HOT!");
-        }
-    } else if (m->env_valid && m->temp_from_rtc) {
-        draw_text_right(0, "RTC");
-    }
-    if (m->env_valid && m->temp_from_rtc && m->temp_warn) {
-        ssd1306_draw_text_scaled(44, 0, "RTC", 1);
-    }
-
-    if (!m->env_valid) {
-        draw_text_centered(14, "--.-C", 3);
-        ssd1306_draw_text_scaled(0, 41, "Waiting for sensor...", 1);
-        draw_mode_dots(m);
-        return;
-    }
-
-    (void)snprintf(buf, sizeof(buf), "%.1fC", (double)m->temp_c);
-    draw_text_centered(10, buf, 3);
-
-    if (m->hum_valid) {
-        (void)snprintf(buf, sizeof(buf), "HUM: %d %%RH", (int)(m->hum_pct + 0.5f));
-    } else {
-        (void)snprintf(buf, sizeof(buf), "HUM: --");
-    }
-    draw_text_centered(33, buf, 1);
-
-    (void)snprintf(buf, sizeof(buf), "T min/max %.1f-%.1f", (double)m->temp_min, (double)m->temp_max);
-    ssd1306_draw_text_scaled(0, 41, buf, 1);
-    if (m->hum_valid) {
-        (void)snprintf(buf, sizeof(buf), "H min/max %d-%d%%", (int)(m->hum_min + 0.5f), (int)(m->hum_max + 0.5f));
-        ssd1306_draw_text_scaled(0, 49, buf, 1);
-    }
-    ssd1306_draw_text_scaled(0, 57, "OK:reset", 1);
     draw_mode_dots(m);
 }
 
@@ -316,8 +366,8 @@ static void draw_screen(const display_msg_t *m, bool highlight)
         draw_stopwatch_screen(m);
     } else if (m->mode == UI_COUNTDOWN) {
         draw_countdown_screen(m, highlight);
-    } else if (m->mode == UI_TEMP) {
-        draw_temp_screen(m, highlight);
+    } else if (m->mode == UI_SETTINGS) {
+        draw_settings_screen(m);
     } else {
         draw_clock_screen(m, highlight);            /* CLOCK, ALARM */
     }
@@ -330,7 +380,10 @@ static void display_task(void *arg)
     memset(&msg, 0, sizeof(msg));
     bool have_msg = false;
     bool last_blink = false;
+    bool contrast_applied = false;
+    uint8_t applied_contrast = 0;
     uint32_t flush_fail = 0;
+    uint32_t contrast_lock_fail = 0;
     const TickType_t blink_ticks = pdMS_TO_TICKS(BLINK_PERIOD_MS);
 
     while (1) {
@@ -344,14 +397,28 @@ static void display_task(void *arg)
         }
 
         bool blink = ((xTaskGetTickCount() / blink_ticks) & 1U) == 0U;
-        bool needs_blink = msg.editing || msg.alarm_ringing || msg.timer_done ||
-                           (msg.mode == UI_TEMP && msg.temp_warn);
+        bool needs_blink = msg.editing || msg.alarm_ringing || msg.timer_done;
         if (needs_blink && blink != last_blink) {
             redraw = true;
         }
         last_blink = blink;
         if (!redraw) {
             continue;
+        }
+
+        if (!contrast_applied || msg.oled_contrast != applied_contrast) {
+            if (i2c_bus_lock(I2C_MUTEX_TIMEOUT_MS)) {
+                ssd1306_set_contrast(msg.oled_contrast);
+                i2c_bus_unlock();
+                applied_contrast = msg.oled_contrast;
+                contrast_applied = true;
+            } else {
+                contrast_lock_fail++;
+                if (contrast_lock_fail == 1U || (contrast_lock_fail % 20U) == 0U) {
+                    ESP_LOGW(TAG, "cannot lock I2C bus for OLED contrast (count %lu)",
+                             (unsigned long)contrast_lock_fail);
+                }
+            }
         }
 
         draw_screen(&msg, blink);

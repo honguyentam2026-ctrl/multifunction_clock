@@ -1,5 +1,5 @@
 /*
- * main.c - PHASE 8: TEMP + diagnostics + software clock.
+ * main.c - PHASE 8: diagnostics + software clock.
  */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -22,7 +22,7 @@ static const char *TAG = "MAIN";
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Multi-function clock - Phase 8 (TEMP + Diagnostics + Software clock)");
+    ESP_LOGI(TAG, "Multi-function clock - Phase 8 (Diagnostics + Software clock)");
 
     ESP_ERROR_CHECK(i2c_bus_init(I2C_SDA_GPIO, I2C_SCL_GPIO));
     (void)i2c_bus_scan();

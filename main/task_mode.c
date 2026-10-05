@@ -26,11 +26,15 @@
 
 static const char *TAG = "MODE";
 
+static const uint8_t s_brightness_contrast[OLED_BRIGHTNESS_LEVEL_COUNT] =
+    OLED_BRIGHTNESS_CONTRAST_VALUES;
+static const uint8_t s_dim_start_hour[AUTO_DIM_PRESET_COUNT] = AUTO_DIM_START_HOURS;
+static const uint8_t s_dim_end_hour[AUTO_DIM_PRESET_COUNT] = AUTO_DIM_END_HOURS;
+
 /* Trường chỉnh sửa của giờ đồng hồ; báo thức dùng 0..1 (giờ, phút); đếm ngược dùng 0..1 (phút, giây). */
 enum { FIELD_HOUR, FIELD_MINUTE, FIELD_DAY, FIELD_MONTH, FIELD_YEAR, FIELD_COUNT };
 enum { CD_FIELD_MIN, CD_FIELD_SEC };
 
-#define SW_MAX_LAPS        5
 #define ALARM_AUTOSTOP_US  (60LL * 1000000LL)       /* chuông báo thức tự tắt sau 60 s */
 #define ALARM_SNOOZE_US    (5LL * 60LL * 1000000LL) /* báo lại sau 5 phút */
 #define TIMER_AUTOSTOP_US  (30LL * 1000000LL)       /* "TIME UP" tự tắt sau 30 s */
@@ -47,8 +51,9 @@ typedef struct {
     rtc_time_t    cur_time;         /* giờ thật gần nhất từ ClockTask */
     edit_target_t edit_target;
     bool          ready;            /* đã có dữ liệu để vẽ */
-    bool          hum_seen;
+    bool          clock_seen;
     uint32_t      last_trigger_key; /* chống kêu lặp trong cùng một phút */
+    int64_t       last_button_us;
 
     /* báo thức: mốc thời gian bằng esp_timer */
     int64_t       alarm_start_us;
@@ -58,6 +63,9 @@ typedef struct {
     bool          sw_running;
     int64_t       sw_accum_us;      /* thời gian đã cộng dồn khi dừng */
     int64_t       sw_start_us;      /* mốc lúc bấm start */
+    uint32_t      sw_laps_ms[SW_MAX_LAPS];
+    uint16_t      sw_lap_total;
+    uint16_t      sw_scroll;        /* số vòng lùi so với trang mới nhất */
 
     /* đếm ngược */
     countdown_state_t cd_state;
@@ -262,7 +270,6 @@ static uint32_t sw_elapsed_ms(const mode_ctx_t *c, int64_t now_us)
 
 static void handle_button_stopwatch(mode_ctx_t *c, button_id_t id, press_type_t press)
 {
-    display_msg_t *m = &c->msg;
     int64_t now = esp_timer_get_time();
 
     if (id == BTN_CENTER && press == PRESS_SHORT) {
@@ -273,6 +280,7 @@ static void handle_button_stopwatch(mode_ctx_t *c, button_id_t id, press_type_t 
         } else {
             c->sw_start_us = now;
             c->sw_running = true;
+            c->sw_scroll = 0;
             ESP_LOGI(TAG, "stopwatch start");
         }
         return;
@@ -280,19 +288,30 @@ static void handle_button_stopwatch(mode_ctx_t *c, button_id_t id, press_type_t 
 
     if (id == BTN_DOWN && press == PRESS_SHORT) {
         if (c->sw_running) {
-            if (m->sw.lap_count < SW_MAX_LAPS) {
-                m->sw.laps_ms[m->sw.lap_count] = sw_elapsed_ms(c, now);
-                m->sw.lap_count++;
-                ESP_LOGI(TAG, "stopwatch lap %d = %lu ms", (int)m->sw.lap_count,
-                         (unsigned long)m->sw.laps_ms[m->sw.lap_count - 1U]);
-            } else {
-                ESP_LOGI(TAG, "stopwatch: lap list full (%d)", SW_MAX_LAPS);
-            }
+            uint32_t lap_ms = sw_elapsed_ms(c, now);
+            c->sw_lap_total++;
+            uint16_t index = (uint16_t)((c->sw_lap_total - 1U) % SW_MAX_LAPS);
+            c->sw_laps_ms[index] = lap_ms;
+            c->sw_scroll = 0;
+            ESP_LOGI(TAG, "stopwatch lap %u = %lu ms", (unsigned)c->sw_lap_total,
+                     (unsigned long)lap_ms);
         } else {
             c->sw_accum_us = 0;
-            memset(m->sw.laps_ms, 0, sizeof(m->sw.laps_ms));
-            m->sw.lap_count = 0;
+            memset(c->sw_laps_ms, 0, sizeof(c->sw_laps_ms));
+            c->sw_lap_total = 0;
+            c->sw_scroll = 0;
             ESP_LOGI(TAG, "stopwatch reset");
+        }
+        return;
+    }
+
+    if (id == BTN_UP && press == PRESS_SHORT && !c->sw_running) {
+        uint16_t retained = (c->sw_lap_total < SW_MAX_LAPS)
+                          ? c->sw_lap_total : SW_MAX_LAPS;
+        if (retained > 3U) {
+            uint16_t max_scroll = (uint16_t)(((retained - 1U) / 3U) * 3U);
+            c->sw_scroll = (c->sw_scroll >= max_scroll)
+                         ? 0U : (uint16_t)(c->sw_scroll + 3U);
         }
     }
 }
@@ -503,30 +522,6 @@ static void handle_button_editing(mode_ctx_t *c, button_id_t id, press_type_t pr
     }
 }
 
-/* ============================ TEMP ============================ */
-
-static void handle_button_temp(mode_ctx_t *c, button_id_t id, press_type_t press)
-{
-    display_msg_t *m = &c->msg;
-    if (id != BTN_CENTER || press != PRESS_SHORT) {
-        return;
-    }
-    if (!m->env_valid) {
-        ESP_LOGI(TAG, "temp: no reading yet, nothing to reset");
-        return;
-    }
-    m->temp_min = m->temp_c;
-    m->temp_max = m->temp_c;
-    if (m->hum_valid) {
-        m->hum_min = m->hum_pct;
-        m->hum_max = m->hum_pct;
-        c->hum_seen = true;
-    } else {
-        c->hum_seen = false;
-    }
-    ESP_LOGI(TAG, "temp: min/max reset");
-}
-
 /* ============================ nút: CLOCK / ALARM / chuyển chế độ ============================ */
 
 static void handle_mode_switch(mode_ctx_t *c, bool next)
@@ -536,6 +531,73 @@ static void handle_mode_switch(mode_ctx_t *c, bool next)
     c->msg.mode = mode;
     c->msg.editing = false;
     c->cd_shown_sec = 0;
+}
+
+static bool update_oled_contrast(mode_ctx_t *c, int64_t now_us)
+{
+    display_msg_t *m = &c->msg;
+    uint8_t contrast = s_brightness_contrast[m->settings.brightness];
+    uint8_t preset = m->settings.dim_preset;
+    if (preset > 0U && preset < AUTO_DIM_PRESET_COUNT && c->clock_seen &&
+        now_us - c->last_button_us >= 10000000LL &&
+        m->mode != UI_SETTINGS && !m->alarm_ringing && !m->timer_done) {
+        uint8_t start = s_dim_start_hour[preset];
+        uint8_t end = s_dim_end_hour[preset];
+        uint8_t hour = c->cur_time.hour;
+        bool in_dim_hours = (start < end)
+                          ? (hour >= start && hour < end)
+                          : (hour >= start || hour < end);
+        if (in_dim_hours) {
+            contrast = DIM_CONTRAST;
+        }
+    }
+    if (m->oled_contrast == contrast) {
+        return false;
+    }
+    m->oled_contrast = contrast;
+    return true;
+}
+
+static void handle_button_settings(mode_ctx_t *c, button_id_t id, press_type_t press)
+{
+    display_msg_t *m = &c->msg;
+    if ((id == BTN_UP || id == BTN_DOWN) && is_step(press)) {
+        int delta = (id == BTN_UP) ? -1 : 1;
+        m->settings.cursor = (uint8_t)wrap((int)m->settings.cursor + delta, 0, 3);
+        return;
+    }
+    if (id != BTN_CENTER || press != PRESS_SHORT) {
+        return;
+    }
+
+    switch (m->settings.cursor) {
+    case 0:
+        m->settings.brightness = (uint8_t)((m->settings.brightness + 1U) %
+                                            OLED_BRIGHTNESS_LEVEL_COUNT);
+        break;
+    case 1:
+        m->settings.dim_preset = (uint8_t)((m->settings.dim_preset + 1U) %
+                                           AUTO_DIM_PRESET_COUNT);
+        break;
+    case 2:
+        m->settings.unit_f = !m->settings.unit_f;
+        break;
+    case 3:
+        m->settings.beep_on = !m->settings.beep_on;
+        break;
+    default:
+        return;
+    }
+
+    esp_err_t err = storage_save_settings(m->settings.brightness, m->settings.dim_preset,
+                                          m->settings.unit_f, m->settings.beep_on);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "storage save settings failed: %s", esp_err_to_name(err));
+    }
+    (void)update_oled_contrast(c, esp_timer_get_time());
+    if (m->settings.beep_on) {
+        send_alarm_cmd(ALARM_CMD_BEEP_SHORT);
+    }
 }
 
 static void handle_button_alarm(mode_ctx_t *c, button_id_t id, press_type_t press)
@@ -580,6 +642,9 @@ static void handle_button_clock(mode_ctx_t *c, button_id_t id, press_type_t pres
 static void handle_button(mode_ctx_t *c, button_id_t id, press_type_t press)
 {
     display_msg_t *m = &c->msg;
+    int64_t now_us = esp_timer_get_time();
+    c->last_button_us = now_us;
+    (void)update_oled_contrast(c, now_us);
 
     /* Quy tắc toàn cục: khi "TIME UP" hoặc báo thức đang kêu, nút ĐẦU TIÊN chỉ để tắt
      * (hoặc báo lại) và bị "ăn" - không làm việc gì khác. Thứ tự khớp với overlay trên màn hình. */
@@ -592,11 +657,9 @@ static void handle_button(mode_ctx_t *c, button_id_t id, press_type_t press)
         return;
     }
 
-#if ENABLE_BUTTON_BEEP
-    if (press == PRESS_SHORT) {
+    if (m->mode != UI_SETTINGS && press == PRESS_SHORT && m->settings.beep_on) {
         send_alarm_cmd(ALARM_CMD_BEEP_SHORT);
     }
-#endif
 
     if (m->editing) {
         handle_button_editing(c, id, press);
@@ -605,6 +668,7 @@ static void handle_button(mode_ctx_t *c, button_id_t id, press_type_t press)
 
     if (press == PRESS_SHORT && (id == BTN_LEFT || id == BTN_RIGHT)) {
         handle_mode_switch(c, id == BTN_RIGHT);
+        (void)update_oled_contrast(c, now_us);
         return;
     }
 
@@ -621,8 +685,8 @@ static void handle_button(mode_ctx_t *c, button_id_t id, press_type_t press)
     case UI_COUNTDOWN:
         handle_button_countdown(c, id, press);
         break;
-    case UI_TEMP:
-        handle_button_temp(c, id, press);
+    case UI_SETTINGS:
+        handle_button_settings(c, id, press);
         break;
     default:
         break;
@@ -638,18 +702,7 @@ static void handle_env(mode_ctx_t *c, const app_event_t *e)
 
     m->temp_c = t;
     m->temp_from_rtc = e->data.env.from_rtc;
-    if (!m->env_valid) {
-        m->env_valid = true;
-        m->temp_min = t;
-        m->temp_max = t;
-    } else {
-        if (t < m->temp_min) {
-            m->temp_min = t;
-        }
-        if (t > m->temp_max) {
-            m->temp_max = t;
-        }
-    }
+    m->env_valid = true;
 
     if (t >= TEMP_WARN_C) {
         if (!m->temp_warn) {
@@ -664,20 +717,7 @@ static void handle_env(mode_ctx_t *c, const app_event_t *e)
 
     m->hum_valid = e->data.env.humidity_valid;
     if (m->hum_valid) {
-        float h = e->data.env.humidity_pct;
-        m->hum_pct = h;
-        if (!c->hum_seen) {
-            c->hum_seen = true;
-            m->hum_min = h;
-            m->hum_max = h;
-        } else {
-            if (h < m->hum_min) {
-                m->hum_min = h;
-            }
-            if (h > m->hum_max) {
-                m->hum_max = h;
-            }
-        }
+        m->hum_pct = e->data.env.humidity_pct;
     }
 }
 
@@ -692,6 +732,10 @@ static bool on_tick(mode_ctx_t *c)
     if (m->snooze_active && !m->alarm_ringing && now >= c->snooze_deadline_us) {
         ESP_LOGI(TAG, "snooze elapsed");
         alarm_start_ring(c, now);
+        dirty = true;
+    }
+
+    if (update_oled_contrast(c, now)) {
         dirty = true;
     }
 
@@ -739,6 +783,7 @@ static bool handle_event(mode_ctx_t *c, const app_event_t *e)
     switch (e->type) {
     case EVT_TIME:
         c->cur_time = e->data.time;
+        c->clock_seen = true;
         c->ready = true;
         m->rtc_ok = !e->soft_time;
         /* Đang chỉnh giờ đồng hồ thì GIỮ giá trị đang chỉnh; đang chỉnh báo thức thì chỉ giữ giờ/phút. */
@@ -752,6 +797,7 @@ static bool handle_event(mode_ctx_t *c, const app_event_t *e)
             }
         }
         maybe_trigger_alarm(c, &e->data.time);
+        (void)update_oled_contrast(c, esp_timer_get_time());
         return true;
 
     case EVT_RTC_ERROR:
@@ -783,6 +829,21 @@ static void refresh_snapshot(mode_ctx_t *c)
 
     m->sw.running = c->sw_running;
     m->sw.elapsed_ms = sw_elapsed_ms(c, now);
+    m->sw.lap_total = c->sw_lap_total;
+
+    uint16_t retained = (c->sw_lap_total < SW_MAX_LAPS)
+                      ? c->sw_lap_total : SW_MAX_LAPS;
+    uint16_t scroll = c->sw_running ? 0U : c->sw_scroll;
+    uint16_t end = retained - scroll;
+    uint16_t first = (end > 3U) ? (uint16_t)(end - 3U) : 0U;
+    m->sw.row_count = (uint8_t)(end - first);
+    for (uint8_t row = 0; row < m->sw.row_count; row++) {
+        uint16_t chronological_index = (uint16_t)(first + row);
+        uint16_t lap_no = (uint16_t)(c->sw_lap_total - retained + 1U + chronological_index);
+        uint16_t ring_index = (uint16_t)((lap_no - 1U) % SW_MAX_LAPS);
+        m->sw.row_no[row] = lap_no;
+        m->sw.row_ms[row] = c->sw_laps_ms[ring_index];
+    }
 
     m->cd.state = c->cd_state;
     m->cd.total_ms = c->cd_total_ms;
@@ -800,6 +861,12 @@ static void mode_task(void *arg)
     memset(&ctx, 0, sizeof(ctx));
     ctx.msg.mode = UI_CLOCK;
     ctx.cd_total_ms = CD_DEFAULT_S * 1000U;
+    ctx.last_button_us = esp_timer_get_time();
+    ctx.msg.settings.brightness = OLED_BRIGHTNESS_LEVEL_COUNT - 1U;
+    ctx.msg.settings.dim_preset = 0;
+    ctx.msg.settings.unit_f = false;
+    ctx.msg.settings.beep_on = ENABLE_BUTTON_BEEP != 0;
+    ctx.msg.oled_contrast = s_brightness_contrast[ctx.msg.settings.brightness];
 
     uint8_t alarm_h = 7;
     uint8_t alarm_m = 0;
@@ -815,6 +882,17 @@ static void mode_task(void *arg)
         ctx.msg.alarm_hour = alarm_h;
         ctx.msg.alarm_minute = alarm_m;
     }
+
+    err = storage_load_settings(&ctx.msg.settings.brightness, &ctx.msg.settings.dim_preset,
+                               &ctx.msg.settings.unit_f, &ctx.msg.settings.beep_on);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "NVS load settings failed (%s), using defaults", esp_err_to_name(err));
+        ctx.msg.settings.brightness = OLED_BRIGHTNESS_LEVEL_COUNT - 1U;
+        ctx.msg.settings.dim_preset = 0;
+        ctx.msg.settings.unit_f = false;
+        ctx.msg.settings.beep_on = ENABLE_BUTTON_BEEP != 0;
+    }
+    ctx.msg.oled_contrast = s_brightness_contrast[ctx.msg.settings.brightness];
 
     uint32_t cd_s = 0;
     err = storage_load_cd_total(&cd_s);

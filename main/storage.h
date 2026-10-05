@@ -14,3 +14,7 @@ esp_err_t storage_save_cd_total(uint32_t total_s);
 /* Giờ lưu gần nhất. Trả ESP_ERR_NVS_NOT_FOUND nếu chưa có hoặc dữ liệu không hợp lệ. */
 esp_err_t storage_load_time(rtc_time_t *t);
 esp_err_t storage_save_time(const rtc_time_t *t);
+esp_err_t storage_load_settings(uint8_t *brightness, uint8_t *dim_preset,
+                                bool *unit_f, bool *beep_on);
+esp_err_t storage_save_settings(uint8_t brightness, uint8_t dim_preset,
+                                bool unit_f, bool beep_on);

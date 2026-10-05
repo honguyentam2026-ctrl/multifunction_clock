@@ -29,7 +29,7 @@ typedef struct {
     bool soft_time;      /* EVT_TIME: true = giờ do đồng hồ phần mềm tạo ra (DS3231 lỗi) */
 } app_event_t;
 
-typedef enum { UI_CLOCK, UI_ALARM, UI_STOPWATCH, UI_COUNTDOWN, UI_TEMP, UI_MODE_COUNT } ui_mode_t;
+typedef enum { UI_CLOCK, UI_ALARM, UI_STOPWATCH, UI_COUNTDOWN, UI_SETTINGS, UI_MODE_COUNT } ui_mode_t;
 typedef enum { CD_IDLE, CD_RUNNING, CD_PAUSED, CD_DONE } countdown_state_t;
 
 typedef struct {
@@ -42,14 +42,29 @@ typedef struct {
     bool      timer_done;        /* overlay "TIME UP" */
     bool      rtc_ok;
     rtc_time_t time;             /* giờ hiện tại (hoặc giờ đang chỉnh) */
-    float     temp_c;  float temp_min;  float temp_max;
-    float     hum_pct; float hum_min;   float hum_max;
+    float     temp_c;
+    float     hum_pct;
     bool      env_valid;         /* false cho tới khi có số đo hợp lệ đầu tiên */
     bool      hum_valid;         /* false khi DHT lỗi (DS3231 không có độ ẩm) */
     bool      temp_from_rtc;     /* true khi nhiệt độ lấy từ DS3231 (dự phòng) */
     bool      temp_warn;         /* đang trong trạng thái cảnh báo nhiệt độ cao */
     uint8_t   alarm_hour, alarm_minute;
-    struct { uint32_t elapsed_ms; bool running; uint32_t laps_ms[5]; uint8_t lap_count; } sw;
+    struct {
+        uint8_t brightness;
+        uint8_t dim_preset;
+        bool unit_f;
+        bool beep_on;
+        uint8_t cursor;
+    } settings;
+    uint8_t oled_contrast;
+    struct {
+        uint32_t elapsed_ms;
+        bool running;
+        uint16_t lap_total;
+        uint8_t row_count;
+        uint16_t row_no[3];
+        uint32_t row_ms[3];
+    } sw;
     struct { uint32_t remain_ms; uint32_t total_ms; countdown_state_t state; } cd;
 } display_msg_t;
 

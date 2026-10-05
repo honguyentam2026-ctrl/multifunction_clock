@@ -48,6 +48,13 @@
 #define TEMP_WARN_HYST_C    2.0f        /* chỉ cảnh báo lại sau khi nhiệt độ < TEMP_WARN_C - giá trị này */
 #define DIAG_PERIOD_MS      30000       /* chu kỳ in chẩn đoán */
 #define TIME_SAVE_PERIOD_SEC 10           /* lưu giờ NVS mỗi N giây, khi giây chia hết cho N */
+#define SW_MAX_LAPS         100         /* số vòng stopwatch giữ trong ring buffer */
+#define OLED_BRIGHTNESS_LEVEL_COUNT 5
+#define OLED_BRIGHTNESS_CONTRAST_VALUES { 0x10, 0x40, 0x80, 0xB0, 0xFF }
+#define AUTO_DIM_PRESET_COUNT 4
+#define AUTO_DIM_START_HOURS { 0, 22, 23, 21 }  /* 0=OFF */
+#define AUTO_DIM_END_HOURS   { 0, 6, 7, 6 }
+#define DIM_CONTRAST         0x05
 
 /* ====================== TASK: ĐỘ ƯU TIÊN / STACK ====================== */
 /* Ưu tiên: nút cao nhất (không mất phím) > clock/mode/alarm (nhạy thời gian)
@@ -62,7 +69,7 @@
 
 #define STACK_BUTTON        3072
 #define STACK_CLOCK         4096
-#define STACK_MODE_MANAGER  5120
+#define STACK_MODE_MANAGER  6144
 #define STACK_ALARM         2048
 #define STACK_DISPLAY       4096
 #define STACK_TEMP          3072
