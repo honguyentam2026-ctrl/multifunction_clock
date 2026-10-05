@@ -10,6 +10,8 @@ QueueHandle_t eventQueue = NULL;
 QueueHandle_t displayQueue = NULL;
 QueueHandle_t alarmQueue = NULL;
 QueueHandle_t rtcCmdQueue = NULL;
+QueueSetHandle_t clockSet = NULL;
+SemaphoreHandle_t clockTickSem = NULL;
 
 static uint32_t s_drop_count = 0;
 static portMUX_TYPE s_drop_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -26,8 +28,23 @@ esp_err_t app_queues_create(void)
         return ESP_ERR_NO_MEM;
     }
 
-    ESP_LOGI(TAG, "queues created: event=%d display=%d alarm=%d rtcCmd=%d",
-             EVENT_QUEUE_LEN, DISPLAY_QUEUE_LEN, ALARM_QUEUE_LEN, RTC_CMD_QUEUE_LEN);
+    clockTickSem = xSemaphoreCreateBinary();
+    clockSet = xQueueCreateSet(CLOCK_SET_LEN);
+    if (clockTickSem == NULL || clockSet == NULL) {
+        ESP_LOGE(TAG, "clock queue set creation failed (out of memory)");
+        return ESP_ERR_NO_MEM;
+    }
+    if (xQueueAddToSet(rtcCmdQueue, clockSet) != pdPASS) {
+        ESP_LOGE(TAG, "cannot add rtcCmdQueue to clockSet");
+        return ESP_ERR_NO_MEM;
+    }
+    if (xQueueAddToSet(clockTickSem, clockSet) != pdPASS) {
+        ESP_LOGE(TAG, "cannot add clockTickSem to clockSet");
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_LOGI(TAG, "queues created: event=%d display=%d alarm=%d rtcCmd=%d clockSet=%d",
+             EVENT_QUEUE_LEN, DISPLAY_QUEUE_LEN, ALARM_QUEUE_LEN, RTC_CMD_QUEUE_LEN, CLOCK_SET_LEN);
     return ESP_OK;
 }
 

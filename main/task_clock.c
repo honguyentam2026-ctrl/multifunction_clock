@@ -3,8 +3,8 @@
  *   Mục đích : là task DUY NHẤT nói chuyện với DS3231 (đọc giờ, ghi giờ). Khi DS3231 lỗi
  *              thì tự chạy ĐỒNG HỒ PHẦN MỀM (tính từ esp_timer) để sản phẩm vẫn hoạt động.
  *   Độ ưu tiên: PRIO_CLOCK (3)
- *   Chu kỳ   : CLOCK_PERIOD_MS (100 ms), dùng vTaskDelayUntil
- *   Queue    : NHẬN rtcCmdQueue (timeout 0)  -> ghi giờ vào DS3231 (hoặc vào đồng hồ mềm)
+ *   Chu kỳ   : CLOCK_PERIOD_MS (100 ms), nhận nhịp từ clockTickSem qua clockSet
+ *   Queue    : NHẬN rtcCmdQueue qua clockSet -> ghi giờ vào DS3231 (hoặc vào đồng hồ mềm)
  *              GỬI  eventQueue  (timeout 0)  -> EVT_TICK_100MS mỗi chu kỳ,
  *                                               EVT_TIME mỗi khi giây đổi (soft_time = true nếu là đồng hồ mềm),
  *                                               EVT_RTC_ERROR một lần khi chuyển sang đồng hồ mềm
@@ -23,6 +23,7 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/timers.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "nvs.h"
@@ -43,6 +44,7 @@ static const char *TAG = "CLOCK";
 /* Chỉ ghi MỘT lần trong task_clock_start() trước khi tạo task, sau đó chỉ ClockTask đọc. */
 static bool s_rtc_init_ok = false;
 static int64_t s_last_saved_second = -1;
+static TimerHandle_t s_tick_timer = NULL;
 
 typedef struct {
     rtc_time_t base;        /* giờ tại thời điểm base_us */
@@ -167,6 +169,12 @@ static void send_simple(event_type_t type)
     (void)app_event_send(&evt, "ClockTask");
 }
 
+static void tick_timer_cb(TimerHandle_t t)
+{
+    (void)t;
+    (void)xSemaphoreGive(clockTickSem);
+}
+
 static esp_err_t rtc_read_locked(rtc_time_t *t)
 {
     if (!i2c_bus_lock(I2C_MUTEX_TIMEOUT_MS)) {
@@ -225,7 +233,6 @@ static void recover_after_power_loss(void)
 static void clock_task(void *arg)
 {
     (void)arg;
-    TickType_t last_wake = xTaskGetTickCount();
     int fail_count = 0;
     int last_second = -1;
     bool rtc_inited = s_rtc_init_ok;
@@ -250,125 +257,129 @@ static void clock_task(void *arg)
     }
 
     while (1) {
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(CLOCK_PERIOD_MS));
-        int64_t now = esp_timer_get_time();
-
-        /* Nhịp 100 ms phát MỖI chu kỳ, kể cả khi DS3231 lỗi: bấm giờ và đếm ngược
-         * tính bằng esp_timer nên vẫn chạy khi mất RTC. */
-        send_simple(EVT_TICK_100MS);
-
-        /* Lệnh đặt giờ từ ModeManager. */
-        rtc_cmd_t cmd;
-        while (xQueueReceive(rtcCmdQueue, &cmd, 0) == pdTRUE) {
-            if (sw_mode) {
-                sw.base = cmd.time;
-                sw.base_us = now;
-                sw.valid = true;
-                sw_send_now = true;
-                esp_err_t save_err = storage_save_time(&cmd.time);
-                if (save_err != ESP_OK) {
-                    ESP_LOGE(TAG, "cannot save manually set time: %s", esp_err_to_name(save_err));
+        QueueSetMemberHandle_t member = xQueueSelectFromSet(clockSet, portMAX_DELAY);
+        if (member == (QueueSetMemberHandle_t)rtcCmdQueue) {
+            rtc_cmd_t cmd;
+            if (xQueueReceive(rtcCmdQueue, &cmd, 0) == pdTRUE) {
+                int64_t now = esp_timer_get_time();
+                if (sw_mode) {
+                    sw.base = cmd.time;
+                    sw.base_us = now;
+                    sw.valid = true;
+                    sw_send_now = true;
+                    esp_err_t save_err = storage_save_time(&cmd.time);
+                    if (save_err != ESP_OK) {
+                        ESP_LOGE(TAG, "cannot save manually set time: %s", esp_err_to_name(save_err));
+                    } else {
+                        s_last_saved_second = time_second_key(&cmd.time);
+                    }
+                    ESP_LOGI(TAG, "SOFTWARE clock set to %04d-%02d-%02d %02d:%02d:%02d",
+                             (int)cmd.time.year, (int)cmd.time.month, (int)cmd.time.day,
+                             (int)cmd.time.hour, (int)cmd.time.minute, (int)cmd.time.second);
                 } else {
-                    s_last_saved_second = time_second_key(&cmd.time);
-                }
-                ESP_LOGI(TAG, "SOFTWARE clock set to %04d-%02d-%02d %02d:%02d:%02d",
-                         (int)cmd.time.year, (int)cmd.time.month, (int)cmd.time.day,
-                         (int)cmd.time.hour, (int)cmd.time.minute, (int)cmd.time.second);
-                continue;
-            }
-            esp_err_t err = rtc_write_locked(&cmd.time);
-            if (err == ESP_OK) {
-                esp_err_t save_err = storage_save_time(&cmd.time);
-                if (save_err != ESP_OK) {
-                    ESP_LOGE(TAG, "cannot save manually set time: %s", esp_err_to_name(save_err));
-                } else {
-                    s_last_saved_second = time_second_key(&cmd.time);
-                }
-                ESP_LOGI(TAG, "RTC set to %04d-%02d-%02d %02d:%02d:%02d",
-                         (int)cmd.time.year, (int)cmd.time.month, (int)cmd.time.day,
-                         (int)cmd.time.hour, (int)cmd.time.minute, (int)cmd.time.second);
-                last_second = -1;
-            } else {
-                ESP_LOGE(TAG, "RTC write failed: %s", esp_err_to_name(err));
-            }
-        }
-
-        if (!sw_mode) {
-            /* ---- chế độ bình thường: đọc DS3231 ---- */
-            rtc_time_t t;
-            memset(&t, 0, sizeof(t));
-            esp_err_t err = rtc_read_locked(&t);
-            if (err == ESP_OK) {
-                fail_count = 0;
-                sw.base = t;                    /* luôn giữ giờ tốt gần nhất để làm điểm xuất phát */
-                sw.base_us = now;
-                sw.valid = true;
-                if (t.second != last_second) {
-                    last_second = t.second;
-                    send_time(&t, false);
-                    if ((t.second % TIME_SAVE_PERIOD_SEC) == 0) {
-                        int64_t second_key = time_second_key(&t);
-                        if (second_key != s_last_saved_second) {
-                            s_last_saved_second = second_key;
-                            esp_err_t save_err = storage_save_time(&t);
-                            if (save_err != ESP_OK) {
-                                ESP_LOGE(TAG, "periodic time save failed: %s", esp_err_to_name(save_err));
-                            }
+                    esp_err_t err = rtc_write_locked(&cmd.time);
+                    if (err == ESP_OK) {
+                        esp_err_t save_err = storage_save_time(&cmd.time);
+                        if (save_err != ESP_OK) {
+                            ESP_LOGE(TAG, "cannot save manually set time: %s", esp_err_to_name(save_err));
+                        } else {
+                            s_last_saved_second = time_second_key(&cmd.time);
                         }
+                        ESP_LOGI(TAG, "RTC set to %04d-%02d-%02d %02d:%02d:%02d",
+                                 (int)cmd.time.year, (int)cmd.time.month, (int)cmd.time.day,
+                                 (int)cmd.time.hour, (int)cmd.time.minute, (int)cmd.time.second);
+                        last_second = -1;
+                    } else {
+                        ESP_LOGE(TAG, "RTC write failed: %s", esp_err_to_name(err));
                     }
                 }
-            } else {
-                if (fail_count < CLOCK_FAIL_LIMIT) {
-                    fail_count++;
-                }
-                if (fail_count >= CLOCK_FAIL_LIMIT) {
-                    ESP_LOGE(TAG, "RTC read failed: %s -> switching to SOFTWARE clock", esp_err_to_name(err));
-                    if (!sw.valid) {
-                        best_estimate_time(&sw.base);
+            }
+        } else if (member == (QueueSetMemberHandle_t)clockTickSem) {
+            /* Semaphore nhị phân gộp tick bị lỡ nếu ClockTask đang bận, như cách bắt kịp tick cũ. */
+            if (xSemaphoreTake(clockTickSem, 0) == pdTRUE) {
+                int64_t now = esp_timer_get_time();
+
+                /* Nhịp 100 ms phát mỗi lần được nhận, kể cả khi DS3231 lỗi. */
+                send_simple(EVT_TICK_100MS);
+
+                if (!sw_mode) {
+                    /* ---- chế độ bình thường: đọc DS3231 ---- */
+                    rtc_time_t t;
+                    memset(&t, 0, sizeof(t));
+                    esp_err_t err = rtc_read_locked(&t);
+                    if (err == ESP_OK) {
+                        fail_count = 0;
+                        sw.base = t;                    /* luôn giữ giờ tốt gần nhất để làm điểm xuất phát */
                         sw.base_us = now;
                         sw.valid = true;
+                        if (t.second != last_second) {
+                            last_second = t.second;
+                            send_time(&t, false);
+                            if ((t.second % TIME_SAVE_PERIOD_SEC) == 0) {
+                                int64_t second_key = time_second_key(&t);
+                                if (second_key != s_last_saved_second) {
+                                    s_last_saved_second = second_key;
+                                    esp_err_t save_err = storage_save_time(&t);
+                                    if (save_err != ESP_OK) {
+                                        ESP_LOGE(TAG, "periodic time save failed: %s", esp_err_to_name(save_err));
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        if (fail_count < CLOCK_FAIL_LIMIT) {
+                            fail_count++;
+                        }
+                        if (fail_count >= CLOCK_FAIL_LIMIT) {
+                            ESP_LOGE(TAG, "RTC read failed: %s -> switching to SOFTWARE clock", esp_err_to_name(err));
+                            if (!sw.valid) {
+                                best_estimate_time(&sw.base);
+                                sw.base_us = now;
+                                sw.valid = true;
+                            }
+                            sw_mode = true;
+                            sw_send_now = true;
+                            last_retry_us = now;
+                            last_reinit_us = now;
+                            send_simple(EVT_RTC_ERROR);
+                        }
                     }
-                    sw_mode = true;
-                    sw_send_now = true;
-                    last_retry_us = now;
-                    last_reinit_us = now;
-                    send_simple(EVT_RTC_ERROR);
-                }
-            }
-        } else {
-            /* ---- đồng hồ phần mềm: tiến theo esp_timer, giữ phần lẻ giây để không trôi ---- */
-            int64_t elapsed = now - sw.base_us;
-            if (elapsed >= 1000000LL) {
-                uint32_t n = (uint32_t)(elapsed / 1000000LL);
-                time_add_seconds(&sw.base, n);
-                sw.base_us += (int64_t)n * 1000000LL;
-                sw_send_now = true;
-            }
-            if (sw_send_now) {
-                sw_send_now = false;
-                send_time(&sw.base, true);
-            }
+                } else {
+                    /* ---- đồng hồ phần mềm: tiến theo esp_timer, giữ phần lẻ giây để không trôi ---- */
+                    int64_t elapsed = now - sw.base_us;
+                    if (elapsed >= 1000000LL) {
+                        uint32_t n = (uint32_t)(elapsed / 1000000LL);
+                        time_add_seconds(&sw.base, n);
+                        sw.base_us += (int64_t)n * 1000000LL;
+                        sw_send_now = true;
+                    }
+                    if (sw_send_now) {
+                        sw_send_now = false;
+                        send_time(&sw.base, true);
+                    }
 
-            /* Mỗi giây thử đọc lại DS3231 để tự phục hồi. */
-            if (now - last_retry_us >= RTC_RETRY_US) {
-                last_retry_us = now;
-                if (!rtc_inited && (now - last_reinit_us) >= RTC_REINIT_US) {
-                    last_reinit_us = now;
-                    if (rtc_init_locked() == ESP_OK) {
-                        rtc_inited = true;
-                        recover_after_power_loss();
+                    /* Mỗi giây thử đọc lại DS3231 để tự phục hồi. */
+                    if (now - last_retry_us >= RTC_RETRY_US) {
+                        last_retry_us = now;
+                        if (!rtc_inited && (now - last_reinit_us) >= RTC_REINIT_US) {
+                            last_reinit_us = now;
+                            if (rtc_init_locked() == ESP_OK) {
+                                rtc_inited = true;
+                                recover_after_power_loss();
+                            }
+                        }
+                        rtc_time_t t;
+                        memset(&t, 0, sizeof(t));
+                        if (rtc_inited && rtc_read_locked(&t) == ESP_OK) {
+                            ESP_LOGI(TAG, "RTC recovered -> back to hardware time");
+                            sw_mode = false;
+                            fail_count = 0;
+                            sw.base = t;
+                            sw.base_us = now;
+                            last_second = t.second;
+                            send_time(&t, false);
+                        }
                     }
-                }
-                rtc_time_t t;
-                memset(&t, 0, sizeof(t));
-                if (rtc_inited && rtc_read_locked(&t) == ESP_OK) {
-                    ESP_LOGI(TAG, "RTC recovered -> back to hardware time");
-                    sw_mode = false;
-                    fail_count = 0;
-                    sw.base = t;
-                    sw.base_us = now;
-                    last_second = t.second;
-                    send_time(&t, false);
                 }
             }
         }
@@ -391,6 +402,17 @@ esp_err_t task_clock_start(void)
         ESP_LOGE(TAG, "cannot create ClockTask");
         return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI(TAG, "ClockTask started (poll %d ms)", CLOCK_PERIOD_MS);
+
+    s_tick_timer = xTimerCreate("ClockTick", pdMS_TO_TICKS(CLOCK_PERIOD_MS),
+                                pdTRUE, NULL, tick_timer_cb);
+    if (s_tick_timer == NULL) {
+        ESP_LOGE(TAG, "cannot create ClockTick timer");
+        return ESP_ERR_NO_MEM;
+    }
+    if (xTimerStart(s_tick_timer, 0) != pdPASS) {
+        ESP_LOGE(TAG, "cannot start ClockTick timer");
+        return ESP_ERR_NO_MEM;
+    }
+    ESP_LOGI(TAG, "ClockTask started (tick %d ms)", CLOCK_PERIOD_MS);
     return ESP_OK;
 }

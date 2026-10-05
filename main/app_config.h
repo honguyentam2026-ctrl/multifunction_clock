@@ -80,6 +80,7 @@
 #define DISPLAY_QUEUE_LEN   1
 #define ALARM_QUEUE_LEN     4
 #define RTC_CMD_QUEUE_LEN   2
+#define CLOCK_SET_LEN       (RTC_CMD_QUEUE_LEN + 1)
 
 /* ====================== CHU KỲ (ms) ====================== */
 #define BUTTON_PERIOD_MS    10
